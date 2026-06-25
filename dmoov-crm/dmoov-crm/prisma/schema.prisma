@@ -1,0 +1,347 @@
+// CRM local de Dmoov — modelo de datos
+// Generado para reemplazar gradualmente a Vambe.
+// Convenciones: todo en español, montos en pesos chilenos (CLP) como enteros.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Catálogos base
+// ----------------------------------------------------------------------------
+
+model Sede {
+  id               String   @id @default(cuid())
+  nombre           String   @unique
+  slug             String   @unique
+  direccion        String?
+  comuna           String?
+  region           String?
+  telefonoVentas   String?
+  telefonoRecepcion String?
+  // WhatsApp del asesor para derivación directa (Peñuelas y Escuela Militar).
+  asesorWhatsapp   String?
+  horario          String?
+  // Si el bot atiende esta sede o solo deriva a un humano.
+  derivaAsesor     Boolean  @default(false)
+  activa           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+
+  planes        Plan[]
+  ejecutivos    Ejecutivo[]
+  clientes      Cliente[]
+  conversaciones Conversacion[]
+  dayPasses     DayPass[]
+  pagos         Pago[]
+  asistentes    Asistente[]
+}
+
+enum Modalidad {
+  PREPAGO    // pago a la firma por todo el periodo
+  RECURRENTE // cargo automático mensual (Transbank)
+}
+
+enum Periodo {
+  MENSUAL
+  TRIMESTRAL
+  SEMESTRAL
+  ANUAL
+  VIP
+  PERSONAL_TRAINING
+}
+
+model Plan {
+  id            String    @id @default(cuid())
+  sede          Sede      @relation(fields: [sedeId], references: [id])
+  sedeId        String
+  nombre        String                       // "Full", "Light", "RP", "VIP Anual"...
+  modalidad     Modalidad
+  periodo       Periodo
+  precioClp     Int                          // precio lista
+  precioPromoClp Int?                        // precio con promoción vigente
+  matriculaClp  Int?
+  descripcion   String?
+  activo        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+
+  pagos         Pago[]
+
+  @@index([sedeId])
+}
+
+model Ejecutivo {
+  id        String   @id @default(cuid())
+  nombre    String
+  email     String?  @unique
+  telefono  String?
+  rol       String?  // "vendedor", "supervisor", "admin"
+  sede      Sede?    @relation(fields: [sedeId], references: [id])
+  sedeId    String?
+  activo    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  clientes       Cliente[]
+  conversaciones Conversacion[]
+  tareas         Tarea[]
+
+  @@index([sedeId])
+}
+
+// ----------------------------------------------------------------------------
+// Pipeline / embudo
+// ----------------------------------------------------------------------------
+
+model Etapa {
+  id        String    @id @default(cuid())
+  nombre    String    @unique
+  orden     Int       @unique
+  color     String?   // hex para el Kanban
+  esFinal   Boolean   @default(false) // ganado o perdido
+  createdAt DateTime  @default(now())
+
+  clientes  Cliente[]
+}
+
+model Etiqueta {
+  id          String   @id @default(cuid())
+  nombre      String   @unique
+  color       String?
+  descripcion String?  // cuándo aplicarla (tomado de los bloques de Vambe)
+  createdAt   DateTime @default(now())
+
+  clientes    ClienteEtiqueta[]
+}
+
+// ----------------------------------------------------------------------------
+// Clientes (leads y socios)
+// ----------------------------------------------------------------------------
+
+model Cliente {
+  id            String     @id @default(cuid())
+  nombre        String?
+  apellido      String?
+  // Teléfono en formato E.164 sin "+" (ej: 56912345678). Identificador principal de WhatsApp.
+  telefono      String     @unique
+  email         String?
+  rut           String?
+  sedeInteres   Sede?      @relation(fields: [sedeInteresId], references: [id])
+  sedeInteresId String?
+  etapa         Etapa?     @relation(fields: [etapaId], references: [id])
+  etapaId       String?
+  ejecutivo     Ejecutivo? @relation(fields: [ejecutivoId], references: [id])
+  ejecutivoId   String?
+  origen        String?    // "whatsapp", "instagram", "formulario_web", "vambe"
+  notas         String?
+  metadata      Json?      // campos personalizados flexibles
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  etiquetas      ClienteEtiqueta[]
+  conversaciones Conversacion[]
+  dayPasses      DayPass[]
+  pagos          Pago[]
+  tareas         Tarea[]
+
+  @@index([sedeInteresId])
+  @@index([etapaId])
+  @@index([ejecutivoId])
+}
+
+model ClienteEtiqueta {
+  cliente    Cliente  @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  clienteId  String
+  etiqueta   Etiqueta @relation(fields: [etiquetaId], references: [id], onDelete: Cascade)
+  etiquetaId String
+  asignadaEn DateTime @default(now())
+
+  @@id([clienteId, etiquetaId])
+  @@index([etiquetaId])
+}
+
+// ----------------------------------------------------------------------------
+// Conversaciones y mensajes
+// ----------------------------------------------------------------------------
+
+enum Canal {
+  WHATSAPP
+  INSTAGRAM
+  EMAIL
+}
+
+enum EstadoConversacion {
+  ABIERTA
+  CERRADA
+  ESPERANDO_HUMANO
+}
+
+model Conversacion {
+  id              String             @id @default(cuid())
+  cliente         Cliente            @relation(fields: [clienteId], references: [id])
+  clienteId       String
+  canal           Canal              @default(WHATSAPP)
+  estado          EstadoConversacion @default(ABIERTA)
+  // Qué asistente está manejando ahora (enrutador, sede_talca, pago_online, daypass...).
+  asistenteActual String?
+  sede            Sede?              @relation(fields: [sedeId], references: [id])
+  sedeId          String?
+  ejecutivo       Ejecutivo?         @relation(fields: [ejecutivoId], references: [id])
+  ejecutivoId     String?
+  ultimaActividad DateTime           @default(now())
+  createdAt       DateTime           @default(now())
+
+  mensajes        Mensaje[]
+
+  @@index([clienteId])
+  @@index([estado])
+}
+
+enum Direccion {
+  ENTRANTE
+  SALIENTE
+}
+
+enum Remitente {
+  CLIENTE
+  IA
+  EJECUTIVO
+  SISTEMA
+}
+
+model Mensaje {
+  id               String       @id @default(cuid())
+  conversacion     Conversacion @relation(fields: [conversacionId], references: [id], onDelete: Cascade)
+  conversacionId   String
+  direccion        Direccion
+  remitente        Remitente
+  contenido        String
+  tipo             String       @default("texto") // texto, imagen, audio, documento
+  // ID del mensaje en la API de WhatsApp Cloud (para evitar duplicados).
+  whatsappMessageId String?     @unique
+  metadata         Json?
+  createdAt        DateTime     @default(now())
+
+  @@index([conversacionId])
+}
+
+// ----------------------------------------------------------------------------
+// Day Pass (primero gratis, luego $25.000)
+// ----------------------------------------------------------------------------
+
+enum EstadoDayPass {
+  REGISTRADO
+  USADO
+  NO_SHOW
+}
+
+model DayPass {
+  id        String        @id @default(cuid())
+  cliente   Cliente       @relation(fields: [clienteId], references: [id])
+  clienteId String
+  sede      Sede          @relation(fields: [sedeId], references: [id])
+  sedeId    String
+  fecha     DateTime
+  gratuito  Boolean       @default(true)
+  montoClp  Int           @default(0)
+  estado    EstadoDayPass @default(REGISTRADO)
+  createdAt DateTime      @default(now())
+
+  @@index([clienteId])
+  @@index([sedeId])
+}
+
+// ----------------------------------------------------------------------------
+// Pagos (links Transbank y seguimiento)
+// ----------------------------------------------------------------------------
+
+enum EstadoPago {
+  PENDIENTE
+  PAGADO
+  EXPIRADO
+  CANCELADO
+}
+
+model Pago {
+  id            String     @id @default(cuid())
+  cliente       Cliente    @relation(fields: [clienteId], references: [id])
+  clienteId     String
+  sede          Sede       @relation(fields: [sedeId], references: [id])
+  sedeId        String
+  plan          Plan?      @relation(fields: [planId], references: [id])
+  planId        String?
+  montoClp      Int
+  estado        EstadoPago @default(PENDIENTE)
+  linkPago      String?
+  proveedor     String     @default("transbank")
+  referencia    String?    // token/orden del proveedor
+  linkEnviadoAt DateTime?
+  pagadoAt      DateTime?
+  createdAt     DateTime   @default(now())
+
+  @@index([clienteId])
+  @@index([estado])
+}
+
+// ----------------------------------------------------------------------------
+// Tareas
+// ----------------------------------------------------------------------------
+
+model Tarea {
+  id          String     @id @default(cuid())
+  cliente     Cliente?   @relation(fields: [clienteId], references: [id])
+  clienteId   String?
+  ejecutivo   Ejecutivo? @relation(fields: [ejecutivoId], references: [id])
+  ejecutivoId String?
+  titulo      String
+  descripcion String?
+  dueAt       DateTime?
+  completada  Boolean    @default(false)
+  createdAt   DateTime   @default(now())
+
+  @@index([clienteId])
+  @@index([ejecutivoId])
+}
+
+// ----------------------------------------------------------------------------
+// Asistentes (configuración de los bots — reemplaza los "Bloques" de Vambe)
+// ----------------------------------------------------------------------------
+
+enum TipoAsistente {
+  ENRUTADOR
+  SEDE
+  PAGO_ONLINE
+  DAYPASS
+  INTERESADO_PLANES
+  REDIRIGIR_PAGO
+  INICIAL
+}
+
+model Asistente {
+  id                  String        @id @default(cuid())
+  nombre              String        @unique
+  tipo                TipoAsistente
+  sede                Sede?         @relation(fields: [sedeId], references: [id])
+  sedeId              String?
+  modelo              String        @default("gemini-3.1-pro")
+  promptIdentidad     String?       // quién es (ej: "Eres Gabriela...")
+  promptInstrucciones String?       // pasos a seguir
+  promptInformacion   String?       // base de conocimiento inyectada
+  activo              Boolean       @default(true)
+  createdAt           DateTime      @default(now())
+
+  @@index([sedeId])
+}
+
+// ----------------------------------------------------------------------------
+// Configuración global clave-valor
+// ----------------------------------------------------------------------------
+
+model Configuracion {
+  clave     String   @id
+  valor     String
+  updatedAt DateTime @updatedAt
+}
